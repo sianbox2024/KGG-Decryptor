@@ -94,6 +94,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 .file-item .status.pending{color:var(--pending)}
 .file-item .status.done{color:var(--success)}
 .file-item .status.error{color:var(--error)}
+.btn-reveal{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;flex-shrink:0;background:var(--bg-elevated);border:1px solid var(--border);border-radius:8px;color:var(--text-muted);cursor:pointer;transition:all 0.15s}
+.btn-reveal:hover{border-color:var(--accent);color:var(--accent);background:var(--bg-hover)}
+.btn-reveal svg{width:16px;height:16px}
 .spinner{width:14px;height:14px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin 0.6s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 .count-pill{font-size:12px;color:var(--text-secondary);background:var(--bg-card);padding:3px 12px;border-radius:20px;border:1px solid var(--border);margin-left:10px;vertical-align:2px}
@@ -198,6 +201,11 @@ html[data-theme="light"] .theme-toggle .moon{display:none}
     <section class="view active" id="view-decrypt">
       <div class="view-title">手动解密</div>
       <div class="view-desc">拖入单个或多个加密文件，立即解密并保存到本地</div>
+      <div class="path-row" style="margin-bottom:16px">
+        <span class="path-label">音频输出</span>
+        <input type="text" class="path-input" id="manualOutput" placeholder="转换后的音频保存位置" />
+        <button class="btn-browse" id="manualOutputBrowse" title="选择输出目录"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
+      </div>
       <div class="upload-zone" id="zone">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></div>
         <p>拖拽加密文件到这里，或 <span class="link">点击选择</span></p>
@@ -302,6 +310,16 @@ var isTauri = !!(window.__TAURI__);
 var invoke = isTauri ? window.__TAURI__.core.invoke : null;
 var dialog = isTauri ? window.__TAURI__.dialog : null;
 var zone=document.getElementById('zone'),input=document.getElementById('input'),list=document.getElementById('list'),toast=document.getElementById('toast'),library=document.getElementById('library'),songCount=document.getElementById('songCount');
+var decryptView=document.getElementById('view-decrypt');
+var manualOutput=document.getElementById('manualOutput'),manualOutputBrowse=document.getElementById('manualOutputBrowse');
+function saveManualOutput(){try{localStorage.setItem('manualOutput',manualOutput.value)}catch(e){}}
+function loadManualOutput(){
+  try{manualOutput.value=localStorage.getItem('manualOutput')||''}catch(e){}
+  if(isTauri&&!manualOutput.value){
+    invoke('default_output_dir').then(function(dir){if(dir&&!manualOutput.value){manualOutput.value=dir;saveManualOutput()}}).catch(function(){});
+  }
+  if(!isTauri&&!manualOutput.value){manualOutput.value='（浏览器模式：保存到下载目录）';manualOutput.disabled=true}
+}
 var monToggle=document.getElementById('monToggle'),monCard=document.getElementById('monCard'),monStatus=document.getElementById('monStatus'),monFeed=document.getElementById('monFeed'),navMonitor=document.getElementById('navMonitor');
 var watchInput=document.getElementById('watchInput'),outputInput=document.getElementById('outputInput'),watchBrowse=document.getElementById('watchBrowse'),outputBrowse=document.getElementById('outputBrowse');
 var batchBtn=document.getElementById('batchBtn'),batchStatus=document.getElementById('batchStatus');
@@ -357,12 +375,15 @@ if(isTauri){
   }).catch(function(){ffmpegStatusEl.textContent='转码引擎状态未知';ffmpegStatusEl.className='out-status warn'});
 }
 loadPaths();
+loadManualOutput();
 
 if(isTauri&&dialog){
   watchBrowse.addEventListener('click',async function(){var s=await dialog.open({directory:true,multiple:false});if(s)watchInput.value=s;savePaths()});
   outputBrowse.addEventListener('click',async function(){var s=await dialog.open({directory:true,multiple:false});if(s)outputInput.value=s;savePaths()});
-}else{watchBrowse.disabled=true;outputBrowse.disabled=true}
+  manualOutputBrowse.addEventListener('click',async function(){var s=await dialog.open({directory:true,multiple:false});if(s){manualOutput.value=s;saveManualOutput()}});
+}else{watchBrowse.disabled=true;outputBrowse.disabled=true;manualOutputBrowse.disabled=true}
 watchInput.addEventListener('change',savePaths);outputInput.addEventListener('change',savePaths);
+manualOutput.addEventListener('change',saveManualOutput);
 
 monToggle.addEventListener('click',async function(){
   if(!isTauri){showToast('请使用桌面版');return}
@@ -438,6 +459,16 @@ lyricBtn.addEventListener('click',async function(){
 });
 
 // ---- Manual decrypt ----
+function addRevealButton(item,path){
+  var btn=document.createElement('button');
+  btn.className='btn-reveal';btn.type='button';btn.title='打开所在目录';
+  btn.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v2"/><path d="M3 9h18v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+  btn.addEventListener('click',async function(){
+    try{await invoke('reveal_file',{path:path})}
+    catch(e){showToast('打开目录失败: '+((e&&e.message)||String(e)))}
+  });
+  item.appendChild(btn);
+}
 function addFile(file){
   var item=document.createElement('div');item.className='file-item';
   item.innerHTML='<svg class="ficon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg><div class="info"><div class="fname">'+file.name+'</div><div class="fmeta">'+formatSize(file.size)+'</div></div><div class="status pending"><span class="spinner"></span>处理中</div>';
@@ -455,19 +486,30 @@ async function processFile(file,item){
         item.querySelector('.fmeta').textContent=formatSize(file.size)+' → LRC';
       }else{
         var oa=outputArgs();
-        var result=await invoke('convert_file',{fileData:Array.from(bytes),filename:file.name,targetFormat:oa.targetFormat,bitrate:oa.bitrate});
-        downloadBytes(new Uint8Array(result.audio),result.title+'.'+result.format);
+        var outDir=manualOutput.value.trim();
+        var result,savedSize;
+        if(isTauri&&outDir){
+          result=await invoke('save_converted_file',{fileData:Array.from(bytes),filename:file.name,targetFormat:oa.targetFormat,bitrate:oa.bitrate,outputDir:outDir});
+          savedSize=result.size;
+          addRevealButton(item,result.path);
+        }else{
+          result=await invoke('convert_file',{fileData:Array.from(bytes),filename:file.name,targetFormat:oa.targetFormat,bitrate:oa.bitrate});
+          downloadBytes(new Uint8Array(result.audio),result.title+'.'+result.format);
+          savedSize=result.audio.length;
+        }
         statusEl.className='status done';statusEl.textContent=result.transcoded?'已转 '+result.format.toUpperCase():'已保存';
-        var meta=formatSize(file.size)+' → '+formatSize(result.audio.length)+' ('+result.format.toUpperCase()+')';
+        var meta=formatSize(file.size)+' → '+formatSize(savedSize)+' ('+result.format.toUpperCase()+')';
         if(result.warning){meta+=' · '+result.warning;item.querySelector('.fmeta').title=result.warning}
         item.querySelector('.fmeta').textContent=meta;
       }
     }
   }catch(e){var msg=(e&&e.message)||String(e);statusEl.className='status error';statusEl.textContent=msg;item.style.borderColor='var(--error)'}
 }
-['dragenter','dragover'].forEach(function(ev){zone.addEventListener(ev,function(e){e.preventDefault();zone.classList.add('dragover')})});
-['dragleave','drop'].forEach(function(ev){zone.addEventListener(ev,function(e){e.preventDefault();zone.classList.remove('dragover')})});
-zone.addEventListener('drop',function(e){var files=[].slice.call(e.dataTransfer.files);if(!files.length)return;files.forEach(addFile)});
+// Tauri 原生文件拖放已关闭（drag_drop_enabled=false），这里使用标准 HTML5 拖放。
+// 监听范围是整个手动解密视图，拖到虚线框内或页面空白处都能接收。
+['dragenter','dragover'].forEach(function(ev){decryptView.addEventListener(ev,function(e){e.preventDefault();if(e.dataTransfer)e.dataTransfer.dropEffect='copy';zone.classList.add('dragover')})});
+['dragleave','drop'].forEach(function(ev){decryptView.addEventListener(ev,function(e){e.preventDefault();zone.classList.remove('dragover')})});
+decryptView.addEventListener('drop',function(e){var files=[].slice.call(e.dataTransfer.files);if(!files.length)return;files.forEach(addFile)});
 zone.addEventListener('click',function(){input.click()});
 input.addEventListener('change',function(e){[].slice.call(e.target.files).forEach(addFile);input.value=''});
 

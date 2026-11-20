@@ -758,6 +758,90 @@ fn convert_file(
     })
 }
 
+#[derive(Serialize)]
+struct SaveResultData {
+    format: String,
+    title: String,
+    path: String,
+    size: usize,
+    transcoded: bool,
+    warning: Option<String>,
+}
+
+/// 手动解密：直接写入已知输出目录，返回完整路径供界面「打开所在目录」使用。
+#[tauri::command]
+fn save_converted_file(
+    file_data: Vec<u8>,
+    filename: String,
+    target_format: String,
+    bitrate: u32,
+    output_dir: String,
+) -> Result<SaveResultData, String> {
+    let (audio, fmt) = formats::decrypt_file(&file_data, &filename)?;
+    let opts = OutputOptions::new(target_format, bitrate);
+    let result = transcode::apply_output(&audio, &fmt, &opts);
+    std::fs::create_dir_all(&output_dir).map_err(|e| format!("创建输出目录失败: {e}"))?;
+    let stem = output_stem(Path::new(&filename));
+    let out_path = Path::new(&output_dir).join(format!("{}.{}", stem, result.format));
+    std::fs::write(&out_path, &result.data).map_err(|e| format!("保存失败: {e}"))?;
+    let size = result.data.len();
+    Ok(SaveResultData {
+        format: result.format,
+        title: stem,
+        path: out_path.to_string_lossy().to_string(),
+        size,
+        transcoded: result.transcoded,
+        warning: result.warning,
+    })
+}
+
+/// 手动解密的默认输出目录：系统「下载」目录。
+#[tauri::command]
+fn default_output_dir() -> String {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    let downloads = Path::new(&home).join("Downloads");
+    if downloads.is_dir() {
+        downloads.to_string_lossy().to_string()
+    } else {
+        home
+    }
+}
+
+/// 在文件管理器中定位转换结果（Windows 下选中文件，其他平台打开所在目录）。
+#[tauri::command]
+fn reveal_file(path: String) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    if !target.exists() {
+        return Err(format!("文件不存在: {path}"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg(format!("/select,{}", target.display()))
+            .spawn()
+            .map_err(|e| format!("打开资源管理器失败: {e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| format!("打开 Finder 失败: {e}"))?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dir = target.parent().unwrap_or(&target);
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| format!("打开文件管理器失败: {e}"))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn ffmpeg_status() -> transcode::FfmpegStatus { transcode::ffmpeg_status() }
 
@@ -981,7 +1065,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init()).plugin(tauri_plugin_dialog::init())
         .manage(std::sync::Mutex::new(MonitorState { watcher: None }))
-        .invoke_handler(tauri::generate_handler![decrypt_kgg, decrypt_file, convert_file, ffmpeg_status, get_songs, start_monitor, stop_monitor, get_kugou_dir, batch_decrypt, get_kugou_lyrics_dir, decrypt_krc, batch_decrypt_lyrics])
+        .invoke_handler(tauri::generate_handler![decrypt_kgg, decrypt_file, convert_file, save_converted_file, default_output_dir, reveal_file, ffmpeg_status, get_songs, start_monitor, stop_monitor, get_kugou_dir, batch_decrypt, get_kugou_lyrics_dir, decrypt_krc, batch_decrypt_lyrics])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -1001,6 +1085,45 @@ mod tests {
         let other = dir.path().join("notes.txt");
         std::fs::write(&other, b"just text").unwrap();
         assert!(!is_supported_input_path(&other));
+    }
+
+    #[test]
+    fn save_converted_file_writes_mp3_to_output_dir() {
+        if transcode::ffmpeg_status().path.is_none() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let samples: Vec<u8> = (0..4000).map(|i| ((i % 200) as u8).wrapping_sub(100)).collect();
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36u32 + samples.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8000u32.to_le_bytes());
+        wav.extend_from_slice(&16000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&samples);
+
+        let out = save_converted_file(
+            wav,
+            "song.wav".into(),
+            "mp3".into(),
+            128,
+            dir.path().to_string_lossy().to_string(),
+        )
+        .unwrap();
+        assert_eq!(out.title, "song");
+        assert_eq!(out.format, "mp3");
+        assert!(out.transcoded);
+        let path = PathBuf::from(&out.path);
+        assert_eq!(path.file_name().unwrap(), "song.mp3");
+        assert!(path.is_file());
+        assert_eq!(&std::fs::read(&path).unwrap()[..3], b"ID3");
     }
 
     #[test]
