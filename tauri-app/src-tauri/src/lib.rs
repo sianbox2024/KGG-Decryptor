@@ -818,8 +818,51 @@ fn reveal_file(path: String) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
+        // 用 Shell API 直接选中文件：explorer.exe 的 /select, 参数在路径含空格时不可靠。
+        // 单独起一个线程初始化 COM，避免与界面线程的 COM 单元模式冲突。
+        let shell_target = target.clone();
+        let selected = std::thread::spawn(move || unsafe {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::System::Com::{
+                CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+            };
+            use windows_sys::Win32::UI::Shell::{
+                ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems,
+            };
+
+            let hr = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+            if hr < 0 {
+                return Err(format!("初始化 COM 失败: 0x{:08X}", hr as u32));
+            }
+            let wide: Vec<u16> = shell_target
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let pidl = ILCreateFromPathW(wide.as_ptr());
+            if pidl.is_null() {
+                CoUninitialize();
+                return Err("无法获取文件位置".to_string());
+            }
+            let hr = SHOpenFolderAndSelectItems(pidl, 0, std::ptr::null(), 0);
+            ILFree(pidl);
+            CoUninitialize();
+            if hr < 0 {
+                Err(format!("定位文件失败: 0x{:08X}", hr as u32))
+            } else {
+                Ok(())
+            }
+        })
+        .join()
+        .unwrap_or_else(|_| Err("定位文件线程异常".to_string()));
+
+        if selected.is_ok() {
+            return Ok(());
+        }
+        // Shell API 不可用时退回 explorer：参数必须分开传，否则含空格的路径无法选中。
         std::process::Command::new("explorer.exe")
-            .arg(format!("/select,{}", target.display()))
+            .arg("/select,")
+            .arg(&target)
             .spawn()
             .map_err(|e| format!("打开资源管理器失败: {e}"))?;
     }
