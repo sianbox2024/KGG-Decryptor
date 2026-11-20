@@ -19,6 +19,9 @@ tauri-app/src-tauri/tools/ffmpeg
 *.ogg
 *.flac
 
+# Local issue screenshots / bug reports
+Issue/
+
 # OS files
 Thumbs.db
 Desktop.ini
