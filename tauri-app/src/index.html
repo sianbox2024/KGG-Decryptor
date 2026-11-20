@@ -117,6 +117,15 @@ html[data-theme="light"]{--bg-base:#f4f3f8;--bg-side:#ffffff;--bg-elevated:#ffff
 html[data-theme="light"] body{background-image:radial-gradient(ellipse 600px 400px at 20% -10%,rgba(140,92,230,0.06),transparent),radial-gradient(ellipse 500px 300px at 90% 10%,rgba(228,173,244,0.05),transparent)}
 html[data-theme="light"] .logo svg,html[data-theme="light"] .btn-action{color:#fff}
 
+.out-settings{padding:12px 10px;margin-bottom:10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card)}
+.out-settings .out-head{font-size:11px;font-weight:700;color:var(--text-muted);letter-spacing:.06em;margin-bottom:8px}
+.out-settings select{width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:7px;padding:6px 8px;color:var(--text-primary);font-size:12px;outline:none;margin-bottom:6px}
+.out-settings select:focus{border-color:var(--accent)}
+.out-settings .out-row{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted)}
+.out-settings .out-row select{margin-bottom:0;flex:1}
+.out-status{font-size:10px;color:var(--text-muted);margin-top:8px;line-height:1.4}
+.out-status.warn{color:var(--pending)}
+
 .theme-toggle{display:flex;align-items:center;gap:11px;width:100%;padding:10px 12px;margin-bottom:10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);cursor:pointer;color:var(--text-secondary);font-size:13px;font-weight:500;transition:all 0.15s}
 .theme-toggle:hover{border-color:var(--border-hover);color:var(--text-primary)}
 .theme-toggle svg{width:16px;height:16px;flex-shrink:0}
@@ -154,6 +163,27 @@ html[data-theme="light"] .theme-toggle .moon{display:none}
       </button>
     </nav>
 
+    <div class="out-settings">
+      <div class="out-head">输出设置 · 全局生效</div>
+      <select id="outFormat" title="目标音频格式">
+        <option value="mp3">转 MP3（通用播放）</option>
+        <option value="flac">转 FLAC（无损）</option>
+        <option value="m4a">转 M4A / AAC</option>
+        <option value="wav">转 WAV</option>
+        <option value="ogg">转 OGG</option>
+        <option value="original">保持原格式（不转码）</option>
+      </select>
+      <div class="out-row" id="bitrateRow"><span>码率</span>
+        <select id="outBitrate" title="MP3/M4A 编码码率">
+          <option value="128">128 kbps</option>
+          <option value="192" selected>192 kbps</option>
+          <option value="256">256 kbps</option>
+          <option value="320">320 kbps</option>
+        </select>
+      </div>
+      <div class="out-status" id="ffmpegStatus">转码引擎检测中…</div>
+    </div>
+
     <button class="theme-toggle" id="themeToggle" title="切换明暗模式">
       <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
       <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
@@ -171,8 +201,8 @@ html[data-theme="light"] .theme-toggle .moon{display:none}
       <div class="upload-zone" id="zone">
         <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></div>
         <p>拖拽加密文件到这里，或 <span class="link">点击选择</span></p>
-        <div class="hint">支持 KGG / KGM / KGMA / VPR / NCM / KWM / QMC / 旧式 MFLAC / MGG 音乐，以及 KRC 歌词</div>
-        <input type="file" id="input" multiple accept=".kgg,.kgm,.kgma,.vpr,.kge,.ncm,.kwm,.qmc0,.qmc2,.qmc3,.qmc4,.qmc6,.qmc8,.qmcflac,.qmcogg,.tkm,.mflac,.mflac0,.mflac1,.mgg,.mgg0,.mgg1,.mggl,.krc,.flac,.mp3,.ogg,.m4a,.aac,.wav" hidden>
+        <div class="hint">支持 KGG / KGE / KGM / KGMA / VPR / NCM / KWM / QMC / 旧式 MFLAC / MGG 及普通音频；按文件头识别，输出格式由左侧设置决定</div>
+        <input type="file" id="input" multiple accept=".kgg,.kgm,.kgma,.vpr,.kge,.ncm,.kwm,.qmc0,.qmc2,.qmc3,.qmc4,.qmc6,.qmc8,.qmcflac,.qmcogg,.tkm,.mflac,.mflac0,.mflac1,.mgg,.mgg0,.mgg1,.mggl,.krc,.flac,.mp3,.ogg,.m4a,.aac,.wav,.ape,.wv,.dff,.dsf" hidden>
       </div>
       <div class="file-list" id="list"></div>
     </section>
@@ -277,6 +307,20 @@ var watchInput=document.getElementById('watchInput'),outputInput=document.getEle
 var batchBtn=document.getElementById('batchBtn'),batchStatus=document.getElementById('batchStatus');
 var monitorOn=false, batchRunning=false;
 
+/* ---- Output settings (shared by manual / monitor / batch) ---- */
+var outFormat=document.getElementById('outFormat'),outBitrate=document.getElementById('outBitrate');
+var bitrateRow=document.getElementById('bitrateRow'),ffmpegStatusEl=document.getElementById('ffmpegStatus');
+function saveOutputSettings(){try{localStorage.setItem('outFormat',outFormat.value);localStorage.setItem('outBitrate',outBitrate.value)}catch(e){}}
+function syncBitrateRow(){bitrateRow.style.display=(outFormat.value==='mp3'||outFormat.value==='m4a')?'flex':'none'}
+function loadOutputSettings(){
+  try{outFormat.value=localStorage.getItem('outFormat')||'mp3';outBitrate.value=localStorage.getItem('outBitrate')||'192'}catch(e){}
+  syncBitrateRow();
+}
+function outputArgs(){return {targetFormat:outFormat.value,bitrate:parseInt(outBitrate.value,10)||192}}
+loadOutputSettings();
+outFormat.addEventListener('change',function(){syncBitrateRow();saveOutputSettings()});
+outBitrate.addEventListener('change',saveOutputSettings);
+
 /* ---- View switching ---- */
 var navItems=[].slice.call(document.querySelectorAll('.nav-item'));
 navItems.forEach(function(btn){
@@ -307,6 +351,10 @@ function addActivity(type,name,msg){
 if(isTauri){
   invoke('get_kugou_dir').then(function(dir){if(dir&&!watchInput.value)watchInput.value=dir;if(dir&&!outputInput.value)outputInput.value=dir;savePaths()});
   window.__TAURI__.event.listen('monitor-event',function(ev){var p=ev.payload;addActivity(p.event_type,p.filename,p.message)});
+  invoke('ffmpeg_status').then(function(s){
+    if(s.available){ffmpegStatusEl.textContent='转码引擎：可用';ffmpegStatusEl.className='out-status'}
+    else{ffmpegStatusEl.textContent='未找到 ffmpeg，将按原格式输出';ffmpegStatusEl.className='out-status warn'}
+  }).catch(function(){ffmpegStatusEl.textContent='转码引擎状态未知';ffmpegStatusEl.className='out-status warn'});
 }
 loadPaths();
 
@@ -323,7 +371,7 @@ monToggle.addEventListener('click',async function(){
     if(!wd){showToast('请设置监听目录');return}
     if(!od){od=wd;outputInput.value=wd}
     try{
-      await invoke('start_monitor',{watchDir:wd,outputDir:od});
+      await invoke('start_monitor',Object.assign({watchDir:wd,outputDir:od},outputArgs()));
       monitorOn=true;monToggle.classList.add('on');monCard.classList.add('active');monStatus.textContent='监控中 · '+wd;navMonitor.classList.add('running');
       watchInput.disabled=true;outputInput.disabled=true;watchBrowse.disabled=true;outputBrowse.disabled=true;
       showToast('自动监控已开启');
@@ -347,7 +395,7 @@ batchBtn.addEventListener('click',async function(){
   batchRunning=true;batchBtn.disabled=true;batchStatus.textContent='处理中...';
   monFeed.innerHTML='';
   try{
-    var r=await invoke('batch_decrypt',{inputDir:id,outputDir:od});
+    var r=await invoke('batch_decrypt',Object.assign({inputDir:id,outputDir:od},outputArgs()));
     batchStatus.textContent='完成: '+r.succeeded+'/'+r.total+'成功'+(r.failed>0?', '+r.failed+'失败':'');
     showToast('批量解密完成: '+r.succeeded+'成功, '+r.failed+'失败');
   }catch(e){
@@ -406,23 +454,20 @@ async function processFile(file,item){
         statusEl.className='status done';statusEl.textContent='已保存';
         item.querySelector('.fmeta').textContent=formatSize(file.size)+' → LRC';
       }else{
-        var result=await invoke('decrypt_file',{fileData:Array.from(bytes),filename:file.name});
+        var oa=outputArgs();
+        var result=await invoke('convert_file',{fileData:Array.from(bytes),filename:file.name,targetFormat:oa.targetFormat,bitrate:oa.bitrate});
         downloadBytes(new Uint8Array(result.audio),result.title+'.'+result.format);
-        statusEl.className='status done';statusEl.textContent='已保存';
-        item.querySelector('.fmeta').textContent=formatSize(file.size)+' → '+formatSize(result.audio.length);
+        statusEl.className='status done';statusEl.textContent=result.transcoded?'已转 '+result.format.toUpperCase():'已保存';
+        var meta=formatSize(file.size)+' → '+formatSize(result.audio.length)+' ('+result.format.toUpperCase()+')';
+        if(result.warning){meta+=' · '+result.warning;item.querySelector('.fmeta').title=result.warning}
+        item.querySelector('.fmeta').textContent=meta;
       }
     }
   }catch(e){var msg=(e&&e.message)||String(e);statusEl.className='status error';statusEl.textContent=msg;item.style.borderColor='var(--error)'}
 }
 ['dragenter','dragover'].forEach(function(ev){zone.addEventListener(ev,function(e){e.preventDefault();zone.classList.add('dragover')})});
 ['dragleave','drop'].forEach(function(ev){zone.addEventListener(ev,function(e){e.preventDefault();zone.classList.remove('dragover')})});
-var supportedExts=['.kgg','.kgm','.kgma','.vpr','.kge','.ncm','.kwm','.qmc0','.qmc2','.qmc3','.qmc4','.qmc6','.qmc8','.qmcflac','.qmcogg','.tkm','.mflac','.mflac0','.mflac1','.mgg','.mgg0','.mgg1','.mggl','.krc'];
-function isSupportedFile(f){var n=f.name.toLowerCase();if(supportedExts.some(function(ext){return n.endsWith(ext)}))return true;
-  // 安卓概念版客户端会写双扩展名文件（如 ".kgg.flac"）：剥掉末尾音频后缀后再测内层扩展名。
-  var m=n.match(/\.(mp3|flac|ogg|m4a|aac|wav|dff)$/i);
-  if(m){var inner=n.slice(0,n.length-m[0].length);return supportedExts.some(function(ext){return inner.endsWith(ext)})}
-  return false}
-zone.addEventListener('drop',function(e){var files=[].slice.call(e.dataTransfer.files);if(!files.length)return;var supported=files.filter(isSupportedFile);if(supported.length<files.length)showToast('已忽略不支持的格式');supported.forEach(addFile)});
+zone.addEventListener('drop',function(e){var files=[].slice.call(e.dataTransfer.files);if(!files.length)return;files.forEach(addFile)});
 zone.addEventListener('click',function(){input.click()});
 input.addEventListener('change',function(e){[].slice.call(e.target.files).forEach(addFile);input.value=''});
 

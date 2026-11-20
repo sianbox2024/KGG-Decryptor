@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use tauri::Emitter;
 
 mod formats;
+mod transcode;
+
+use transcode::OutputOptions;
 
 const PAGE_SIZE: usize = 0x400;
 const SQLITE_HEADER: &[u8] = b"SQLite format 3\x00";
@@ -328,21 +331,50 @@ fn sniff_ext(data: &[u8]) -> &'static str {
     else if data.len() >= 8 && &data[4..8] == b"ftyp" { "m4a" }
     else if data.starts_with(&[0x30, 0x26, 0xB2, 0x75]) { "wma" }
     else if data.starts_with(b"FRM8") { "dff" }
+    else if data.starts_with(b"MAC ") { "ape" }
+    else if data.starts_with(b"wvpk") { "wv" }
+    else if data.starts_with(b"DSD ") { "dsf" }
     else { "bin" }
 }
 
 fn is_supported_audio_ext(ext: &str) -> bool {
-    matches!(
-        ext.to_ascii_lowercase().as_str(),
-            "kgg" | "kgm" | "kgma" | "vpr" | "ncm" | "kwm"
-            | "mflac" | "mflac0" | "mflac1" | "mgg" | "mgg0" | "mgg1" | "mggl"
-            | "qmc0" | "qmc2" | "qmc3" | "qmc4" | "qmc6" | "qmc8"
-            | "qmcflac" | "qmcogg" | "tkm"
-    )
+    formats::is_encrypted_ext(ext) || formats::is_plain_audio_ext(ext)
 }
 
-fn is_supported_watch_ext(ext: &str) -> bool {
-    is_supported_audio_ext(ext) || ext.eq_ignore_ascii_case("krc")
+/// 监控/批量使用的文件判定：兼容双后缀、普通音频，以及无法按后缀识别的加密容器。
+fn is_supported_input_path(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()) else {
+        return false;
+    };
+    let base = formats::strip_audio_suffix(&name);
+    let ext = base.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    if ext.eq_ignore_ascii_case("krc") || is_supported_audio_ext(ext) {
+        return true;
+    }
+    use std::io::Read;
+    if let Ok(mut f) = std::fs::File::open(path) {
+        let mut head = [0u8; 16];
+        if f.read(&mut head).unwrap_or(0) >= 8 && formats::looks_encrypted(&head) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 输出文件名：剥掉安卓概念版的双后缀，避免生成 "song.kgg.mp3"。
+fn output_stem(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".into());
+    let base = formats::strip_audio_suffix(&name);
+    base.rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(base)
+        .to_string()
 }
 
 fn decrypt_watch_file(data: &[u8], path: &str) -> Result<(Vec<u8>, String), String> {
@@ -661,13 +693,25 @@ fn find_kugou_lyrics_dir() -> Option<String> {
 struct SongInfo { filename: String, display_name: String, song_name: String, artist: String, album: String, bitrate: i64, duration_ms: i64, file_size: i64, quality: String, audio_hash: String }
 
 #[derive(Serialize)]
-struct DecryptResultData { audio: Vec<u8>, format: String, title: String }
+struct DecryptResultData {
+    audio: Vec<u8>,
+    format: String,
+    title: String,
+    transcoded: bool,
+    warning: Option<String>,
+}
 
 #[derive(Serialize)]
 struct SongListResult { success: bool, total: usize, songs: Vec<SongInfo>, error: Option<String> }
 
 #[derive(Serialize, Clone)]
-struct BatchItem { filename: String, success: bool, format: String, error: Option<String> }
+struct BatchItem {
+    filename: String,
+    success: bool,
+    format: String,
+    warning: Option<String>,
+    error: Option<String>,
+}
 
 #[derive(Serialize)]
 struct BatchResult { total: usize, succeeded: usize, failed: usize, items: Vec<BatchItem> }
@@ -677,7 +721,7 @@ struct BatchResult { total: usize, succeeded: usize, failed: usize, items: Vec<B
 fn decrypt_kgg(file_data: Vec<u8>, filename: String) -> Result<DecryptResultData, String> {
     let (audio, fmt) = formats::decrypt_file(&file_data, &filename)?;
     let title = std::path::Path::new(&filename).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or(filename);
-    Ok(DecryptResultData { audio, format: fmt, title })
+    Ok(DecryptResultData { audio, format: fmt, title, transcoded: false, warning: None })
 }
 
 /// 扩展界面使用的统一解码入口。
@@ -689,8 +733,33 @@ fn decrypt_file(file_data: Vec<u8>, filename: String) -> Result<DecryptResultDat
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or(filename);
-    Ok(DecryptResultData { audio, format: fmt, title })
+    Ok(DecryptResultData { audio, format: fmt, title, transcoded: false, warning: None })
 }
+
+/// 解密 + 按输出设置转码（手动拖拽入口）。
+#[tauri::command]
+fn convert_file(
+    file_data: Vec<u8>,
+    filename: String,
+    target_format: String,
+    bitrate: u32,
+) -> Result<DecryptResultData, String> {
+    let (audio, fmt) = formats::decrypt_file(&file_data, &filename)?;
+    let opts = OutputOptions::new(target_format, bitrate);
+    let result = transcode::apply_output(&audio, &fmt, &opts);
+    let path = std::path::Path::new(&filename);
+    let stem = output_stem(path);
+    Ok(DecryptResultData {
+        audio: result.data,
+        format: result.format,
+        title: stem,
+        transcoded: result.transcoded,
+        warning: result.warning,
+    })
+}
+
+#[tauri::command]
+fn ffmpeg_status() -> transcode::FfmpegStatus { transcode::ffmpeg_status() }
 
 #[tauri::command]
 fn get_songs() -> SongListResult {
@@ -704,28 +773,41 @@ fn get_songs() -> SongListResult {
 }
 
 #[tauri::command]
-fn start_monitor(watch_dir: String, output_dir: String, state: tauri::State<'_, std::sync::Mutex<MonitorState>>, app: tauri::AppHandle) -> Result<String, String> {
+fn start_monitor(
+    watch_dir: String,
+    output_dir: String,
+    target_format: String,
+    bitrate: u32,
+    state: tauri::State<'_, std::sync::Mutex<MonitorState>>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
     std::fs::create_dir_all(&output_dir).map_err(|e| format!("创建输出目录失败: {e}"))?;
     { let mut s = state.lock().unwrap(); s.watcher = None; }
     let out_dir = output_dir.clone();
     let app_h = app.clone();
+    let opts = OutputOptions::new(target_format, bitrate);
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, _>| {
         if let Ok(event) = res {
             if !matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) { return; }
             for p in &event.paths {
-                if p.extension().map_or(false, |e| is_supported_watch_ext(&e.to_string_lossy())) {
+                if is_supported_input_path(p) {
                     let fp = p.clone(); let od = out_dir.clone(); let ah = app_h.clone();
-                    let fname = fp.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                    let opt_copy = opts.clone();
+                    let fname = output_stem(&fp);
                     let _ = ah.emit("monitor-event", MonitorEvent { event_type: "detect".into(), filename: fname.clone(), message: "detected".into() });
                     std::thread::spawn(move || {
                         if !wait_for_stable(&fp) { let _ = ah.emit("monitor-event", MonitorEvent { event_type: "error".into(), filename: fname, message: "timeout".into() }); return; }
                         match std::fs::read(&fp) {
                             Ok(data) => match decrypt_watch_file(&data, &fp.to_string_lossy()) {
                                 Ok((audio, fmt)) => {
-                                    let stem = fp.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or("output".into());
-                                    let out_path = Path::new(&od).join(stem + "." + &fmt);
-                                    match std::fs::write(&out_path, &audio) {
-                                        Ok(_) => { let _ = ah.emit("monitor-event", MonitorEvent { event_type: "success".into(), filename: fname, message: format!(".{}", fmt) }); }
+                                    let result = transcode::apply_output(&audio, &fmt, &opt_copy);
+                                    let out_path = Path::new(&od).join(fname.clone() + "." + &result.format);
+                                    let msg = match &result.warning {
+                                        Some(w) => format!(".{} · {}", result.format, w),
+                                        None => format!(".{}", result.format),
+                                    };
+                                    match std::fs::write(&out_path, &result.data) {
+                                        Ok(_) => { let _ = ah.emit("monitor-event", MonitorEvent { event_type: "success".into(), filename: fname, message: msg }); }
                                         Err(e) => { let _ = ah.emit("monitor-event", MonitorEvent { event_type: "error".into(), filename: fname, message: format!("save: {}", e) }); }
                                     }
                                 }
@@ -749,35 +831,47 @@ fn stop_monitor(state: tauri::State<'_, std::sync::Mutex<MonitorState>>) -> Resu
 }
 
 #[tauri::command]
-fn batch_decrypt(input_dir: String, output_dir: String, app: tauri::AppHandle) -> Result<BatchResult, String> {
+fn batch_decrypt(
+    input_dir: String,
+    output_dir: String,
+    target_format: String,
+    bitrate: u32,
+    app: tauri::AppHandle,
+) -> Result<BatchResult, String> {
     std::fs::create_dir_all(&output_dir).map_err(|e| format!("创建输出目录失败: {e}"))?;
+    let opts = OutputOptions::new(target_format, bitrate);
     let mut items = Vec::new();
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let entries = std::fs::read_dir(&input_dir).map_err(|e| e.to_string())?;
     let mut supported_files: Vec<_> = entries.flatten()
-        .filter(|e| e.path().extension().map_or(false, |ext| is_supported_audio_ext(&ext.to_string_lossy())))
+        .filter(|e| is_supported_input_path(&e.path()) && !e.path().extension().map_or(false, |x| x.eq_ignore_ascii_case("krc")))
         .collect();
     supported_files.sort_by_key(|e| e.path());
     let total = supported_files.len();
     for entry in supported_files {
         let path = entry.path();
-        let fname = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let fname = output_stem(&path);
         let _ = app.emit("monitor-event", MonitorEvent {
             event_type: "detect".into(), filename: fname.clone(), message: "batch".into()
         });
         match std::fs::read(&path) {
             Ok(data) => match formats::decrypt_file(&data, &path.to_string_lossy()) {
                 Ok((audio, fmt)) => {
-                    let out_name = format!("{}.{}", fname, fmt);
+                    let result = transcode::apply_output(&audio, &fmt, &opts);
+                    let out_name = format!("{}.{}", fname, result.format);
                     let out_path = Path::new(&output_dir).join(&out_name);
-                    match std::fs::write(&out_path, &audio) {
+                    let msg = match &result.warning {
+                        Some(w) => format!(".{} · {}", result.format, w),
+                        None => format!(".{}", result.format),
+                    };
+                    match std::fs::write(&out_path, &result.data) {
                         Ok(_) => {
                             succeeded += 1;
                             let _ = app.emit("monitor-event", MonitorEvent {
-                                event_type: "success".into(), filename: fname.clone(), message: format!(".{}", fmt)
+                                event_type: "success".into(), filename: fname.clone(), message: msg
                             });
-                            items.push(BatchItem { filename: fname, success: true, format: fmt, error: None });
+                            items.push(BatchItem { filename: fname, success: true, format: result.format, warning: result.warning, error: None });
                         }
                         Err(e) => {
                             failed += 1;
@@ -785,7 +879,7 @@ fn batch_decrypt(input_dir: String, output_dir: String, app: tauri::AppHandle) -
                             let _ = app.emit("monitor-event", MonitorEvent {
                                 event_type: "error".into(), filename: fname.clone(), message: msg.clone()
                             });
-                            items.push(BatchItem { filename: fname, success: false, format: String::new(), error: Some(msg) });
+                            items.push(BatchItem { filename: fname, success: false, format: String::new(), warning: None, error: Some(msg) });
                         }
                     }
                 }
@@ -794,7 +888,7 @@ fn batch_decrypt(input_dir: String, output_dir: String, app: tauri::AppHandle) -
                     let _ = app.emit("monitor-event", MonitorEvent {
                         event_type: "error".into(), filename: fname.clone(), message: e.clone()
                     });
-                    items.push(BatchItem { filename: fname, success: false, format: String::new(), error: Some(e) });
+                    items.push(BatchItem { filename: fname, success: false, format: String::new(), warning: None, error: Some(e) });
                 }
             },
             Err(e) => {
@@ -803,7 +897,7 @@ fn batch_decrypt(input_dir: String, output_dir: String, app: tauri::AppHandle) -
                 let _ = app.emit("monitor-event", MonitorEvent {
                     event_type: "error".into(), filename: fname.clone(), message: msg.clone()
                 });
-                items.push(BatchItem { filename: fname, success: false, format: String::new(), error: Some(msg) });
+                items.push(BatchItem { filename: fname, success: false, format: String::new(), warning: None, error: Some(msg) });
             }
         }
     }
@@ -849,7 +943,7 @@ fn batch_decrypt_lyrics(input_dir: String, output_dir: String, app: tauri::AppHa
                             let _ = app.emit("monitor-event", MonitorEvent {
                                 event_type: "success".into(), filename: fname.clone(), message: ".lrc".into()
                             });
-                            items.push(BatchItem { filename: fname, success: true, format: "lrc".into(), error: None });
+                            items.push(BatchItem { filename: fname, success: true, format: "lrc".into(), warning: None, error: None });
                         }
                         Err(e) => {
                             failed += 1;
@@ -857,7 +951,7 @@ fn batch_decrypt_lyrics(input_dir: String, output_dir: String, app: tauri::AppHa
                             let _ = app.emit("monitor-event", MonitorEvent {
                                 event_type: "error".into(), filename: fname.clone(), message: msg.clone()
                             });
-                            items.push(BatchItem { filename: fname, success: false, format: String::new(), error: Some(msg) });
+                            items.push(BatchItem { filename: fname, success: false, format: String::new(), warning: None, error: Some(msg) });
                         }
                     }
                 }
@@ -866,7 +960,7 @@ fn batch_decrypt_lyrics(input_dir: String, output_dir: String, app: tauri::AppHa
                     let _ = app.emit("monitor-event", MonitorEvent {
                         event_type: "error".into(), filename: fname.clone(), message: e.clone()
                     });
-                    items.push(BatchItem { filename: fname, success: false, format: String::new(), error: Some(e) });
+                    items.push(BatchItem { filename: fname, success: false, format: String::new(), warning: None, error: Some(e) });
                 }
             },
             Err(e) => {
@@ -875,7 +969,7 @@ fn batch_decrypt_lyrics(input_dir: String, output_dir: String, app: tauri::AppHa
                 let _ = app.emit("monitor-event", MonitorEvent {
                     event_type: "error".into(), filename: fname.clone(), message: msg.clone()
                 });
-                items.push(BatchItem { filename: fname, success: false, format: String::new(), error: Some(msg) });
+                items.push(BatchItem { filename: fname, success: false, format: String::new(), warning: None, error: Some(msg) });
             }
         }
     }
@@ -887,7 +981,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init()).plugin(tauri_plugin_dialog::init())
         .manage(std::sync::Mutex::new(MonitorState { watcher: None }))
-        .invoke_handler(tauri::generate_handler![decrypt_kgg, decrypt_file, get_songs, start_monitor, stop_monitor, get_kugou_dir, batch_decrypt, get_kugou_lyrics_dir, decrypt_krc, batch_decrypt_lyrics])
+        .invoke_handler(tauri::generate_handler![decrypt_kgg, decrypt_file, convert_file, ffmpeg_status, get_songs, start_monitor, stop_monitor, get_kugou_dir, batch_decrypt, get_kugou_lyrics_dir, decrypt_krc, batch_decrypt_lyrics])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -895,6 +989,25 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_path_detection_covers_kge_double_suffix_and_plain_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["song.kge", "song.kgg.flac", "song.flac", "song.krc"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"placeholder").unwrap();
+            assert!(is_supported_input_path(&path), "{name} 应被识别");
+        }
+        let other = dir.path().join("notes.txt");
+        std::fs::write(&other, b"just text").unwrap();
+        assert!(!is_supported_input_path(&other));
+    }
+
+    #[test]
+    fn output_stem_strips_double_audio_suffix() {
+        assert_eq!(output_stem(Path::new("/tmp/song.kgg.flac")), "song");
+        assert_eq!(output_stem(Path::new("/tmp/song.kgm")), "song");
+    }
 
     fn write_varint(out: &mut Vec<u8>, mut v: u64) {
         loop {

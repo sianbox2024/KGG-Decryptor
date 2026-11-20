@@ -8,6 +8,10 @@ tauri-app/dist/
 tauri-app/src-tauri/target/
 tauri-app/src-tauri/gen/
 
+# Bundled third-party binary (download separately, see src-tauri/tools/README.md)
+tauri-app/src-tauri/tools/ffmpeg.exe
+tauri-app/src-tauri/tools/ffmpeg
+
 # Personal data - NEVER commit
 *.db
 *.kgg

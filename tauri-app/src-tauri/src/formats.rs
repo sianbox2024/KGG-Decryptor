@@ -26,22 +26,59 @@ const NCM_CORE_KEY: [u8; 16] = [
     0x35, 0x6b, 0x49, 0x6e, 0x62, 0x61, 0x78, 0x57,
 ];
 
+/// 已解密/未加密的普通音频后缀：直接透传，或按需转码，不做任何解密运算。
+pub(crate) const PLAIN_AUDIO_EXT: &[&str] = &[
+    "mp3", "flac", "ogg", "wav", "aac", "m4a", "wma", "dff", "dsf", "ape", "wv",
+];
+
+pub(crate) fn is_plain_audio_ext(ext: &str) -> bool {
+    PLAIN_AUDIO_EXT.contains(&ext.to_ascii_lowercase().as_str())
+}
+
+pub(crate) fn is_encrypted_ext(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "kgg" | "kgm" | "kgma" | "vpr" | "kge"
+            | "ncm" | "kwm"
+            | "qmc0" | "qmc2" | "qmc3" | "qmc4" | "qmc6" | "qmc8"
+            | "qmcflac" | "qmcogg" | "tkm"
+            | "mflac" | "mflac0" | "mflac1"
+            | "mgg" | "mgg0" | "mgg1" | "mggl"
+    )
+}
+
+/// 手机客户端会给文件追加音频后缀（如 "xxx.kgg.flac"），剥掉这层再匹配真实扩展名。
+/// 单个普通音频文件（"song.flac"）不会被误剥。
+pub(crate) fn strip_audio_suffix(name: &str) -> &str {
+    if let Some((base, ext)) = name.rsplit_once('.') {
+        if is_plain_audio_ext(ext) && base.contains('.') {
+            return base;
+        }
+    }
+    name
+}
+
+/// 扩展名不可信时，按文件头判断是否为支持的加密容器。
+pub(crate) fn looks_encrypted(data: &[u8]) -> bool {
+    data.starts_with(&KGM_MAGIC)
+        || data.starts_with(&VPR_MAGIC)
+        || data.starts_with(NCM_MAGIC)
+        || data.starts_with(KWM_MAGIC_1)
+        || data.starts_with(KWM_MAGIC_2)
+}
+
 pub(crate) fn decrypt_file(data: &[u8], filename: &str) -> Result<(Vec<u8>, String), String> {
-    // 手机客户端会给文件追加音频后缀（如 "xxx.kgg.flac"），先剥掉这层再匹配真实扩展名。
-    let base = filename
-        .rsplit_once('.')
-        .map(|(_, e)| e.to_ascii_lowercase())
-        .filter(|e| matches!(e.as_str(), "mp3" | "flac" | "ogg" | "m4a" | "aac" | "wav" | "dff"))
-        .map(|_| {
-            filename
-                .strip_suffix(&filename[filename.rfind('.').unwrap()..])
-                .unwrap_or(filename)
-        })
-        .unwrap_or(filename);
+    let base = strip_audio_suffix(filename);
     let ext = base
         .rsplit_once('.')
         .map(|(_, e)| e.to_ascii_lowercase())
         .unwrap_or_default();
+
+    // 普通音频直接透传；真实编码仍以文件头为准，识别不了时用后缀。
+    if is_plain_audio_ext(&ext) {
+        let detected = sniff_audio(data).unwrap_or_else(|_| ext.clone());
+        return Ok((data.to_vec(), detected));
+    }
 
     match ext.as_str() {
         "kgg" => super::decrypt_kgg_bytes(data),
@@ -55,6 +92,16 @@ pub(crate) fn decrypt_file(data: &[u8], filename: &str) -> Result<(Vec<u8>, Stri
         | "mflac" | "mflac0" | "mflac1"
         | "mgg" | "mgg0" | "mgg1" | "mggl" => decrypt_qmc(data),
         "krc" => Err("KRC 是歌词格式，请使用歌词转换入口".into()),
+        // 未知后缀 / 改名文件：按文件头识别，尽量不因为扩展名而漏掉酷狗的新变体。
+        _ if looks_encrypted(data) => {
+            if data.starts_with(&KGM_MAGIC) || data.starts_with(&VPR_MAGIC) {
+                decrypt_kgm(data, &ext)
+            } else if data.starts_with(NCM_MAGIC) {
+                decrypt_ncm(data)
+            } else {
+                decrypt_kwm(data)
+            }
+        }
         _ => Err(format!("暂不支持 .{} 格式", if ext.is_empty() { "?" } else { &ext })),
     }
 }
@@ -300,6 +347,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn plain_audio_is_passed_through() {
+        let raw = b"fLaC plain bytes".to_vec();
+        let (audio, ext) = decrypt_file(&raw, "song.flac").unwrap();
+        assert_eq!(audio, raw);
+        assert_eq!(ext, "flac");
+    }
+
+    #[test]
+    fn unrecognized_extension_still_dispatches_by_magic() {
+        let mut file = vec![0u8; 0x40];
+        file[..16].copy_from_slice(&KGM_MAGIC);
+        file[0x10..0x14].copy_from_slice(&0x40u32.to_le_bytes());
+        file[0x14..0x18].copy_from_slice(&3u32.to_le_bytes());
+        file[0x18..0x1c].copy_from_slice(&1u32.to_le_bytes());
+        for (i, b) in [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                       0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x11, 0x22].iter().enumerate() {
+            file[0x2c + i] = *b;
+        }
+        let slot = kugou_md5(&[0x6c, 0x2c, 0x2f, 0x27]);
+        let mut file_key = kugou_md5(&file[0x2c..0x3c]).to_vec();
+        file_key.push(0x6b);
+        let plain = b"ID3 decrypted payload";
+        for (i, byte) in plain.iter().enumerate() {
+            let mut b = *byte;
+            b ^= (i as u32 as u8) ^ ((i as u32 >> 8) as u8)
+                ^ ((i as u32 >> 16) as u8) ^ ((i as u32 >> 24) as u8);
+            b ^= slot[i % slot.len()];
+            let lo = b & 0x0f;
+            let hi = ((b >> 4) ^ lo) & 0x0f;
+            b = (hi << 4) | lo;
+            b ^= file_key[i % file_key.len()];
+            file.push(b);
+        }
+        let (audio, ext) = decrypt_file(&file, "track.no_extension").unwrap();
+        assert_eq!(audio, plain);
+        assert_eq!(ext, "mp3");
+    }
+
+    #[test]
+    fn double_suffix_routes_to_inner_encrypted_format() {
+        // 只要分发到 KGG 解码器即可，头部不完整应报 KGG 相关错误而不是「不支持 .flac」。
+        let err = decrypt_file(&vec![0u8; 0x50], "song.kgg.flac").unwrap_err();
+        assert!(err.to_ascii_lowercase().contains("kgg"), "{err}");
+    }
+
+    #[test]
+    fn suffix_helpers_recognize_kge_and_double_extension() {
+        assert!(is_encrypted_ext("kge"));
+        assert_eq!(strip_audio_suffix("song.kgg.flac"), "song.kgg");
+        assert_eq!(strip_audio_suffix("song.flac"), "song.flac");
+    }
+
+    #[test]
     fn qmc_static_cipher_is_reversible() {
         let plain = b"ID3 synthetic qmc payload".to_vec();
         let mut encrypted = plain.clone();
@@ -425,8 +525,7 @@ mod tests {
     // ---- KGM v3：XOR 链按 fileKey / b<<4 / slot / 偏移折叠 的顺序解密，
     // 因此加密必须按逆序执行（`b ^= b<<4` 不是对合运算）。----
 
-    #[test]
-    fn kgm_v3_round_trip() {
+    fn build_kgm_v3(plain: &[u8]) -> Vec<u8> {
         let mut file = vec![0u8; 0x40];
         file[..16].copy_from_slice(&KGM_MAGIC);
         file[0x10..0x14].copy_from_slice(&0x40u32.to_le_bytes());
@@ -436,17 +535,10 @@ mod tests {
                        0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x11, 0x22].iter().enumerate() {
             file[0x2c + i] = *b;
         }
-
         let slot = kugou_md5(&[0x6c, 0x2c, 0x2f, 0x27]);
         let mut file_key = kugou_md5(&file[0x2c..0x3c]).to_vec();
         file_key.push(0x6b);
-
-        let plain: Vec<u8> = {
-            let mut v = b"fLaC".to_vec();
-            v.extend((0..512u32).map(|i| i as u8).collect::<Vec<_>>());
-            v
-        };
-        let mut enc = plain.clone();
+        let mut enc = plain.to_vec();
         for (i, byte) in enc.iter_mut().enumerate() {
             *byte ^= (i as u32 as u8)
                 ^ ((i as u32 >> 8) as u8)
@@ -460,10 +552,52 @@ mod tests {
             *byte ^= file_key[i % file_key.len()];
         }
         file.extend_from_slice(&enc);
+        file
+    }
 
+    #[test]
+    fn kgm_v3_round_trip() {
+        let plain: Vec<u8> = {
+            let mut v = b"fLaC".to_vec();
+            v.extend((0..512u32).map(|i| i as u8).collect::<Vec<_>>());
+            v
+        };
+        let file = build_kgm_v3(&plain);
         let (audio, ext) = decrypt_file(&file, "song.kgm").unwrap();
         assert_eq!(audio, plain);
         assert_eq!(ext, "flac");
+    }
+
+    #[test]
+    fn encrypted_kgm_can_be_decrypted_and_transcoded_to_mp3() {
+        if !crate::transcode::ffmpeg_status().available {
+            return; // 无 ffmpeg 的环境跳过
+        }
+        // 生成真实的 WAV 音频载荷（ffmpeg 才认得出），再装入 KGM v3 容器。
+        let samples: Vec<u8> = (0..4000).map(|i| ((i % 200) as u8).wrapping_sub(100)).collect();
+        let mut plain = Vec::new();
+        plain.extend_from_slice(b"RIFF");
+        plain.extend_from_slice(&(36u32 + samples.len() as u32).to_le_bytes());
+        plain.extend_from_slice(b"WAVEfmt ");
+        plain.extend_from_slice(&16u32.to_le_bytes());
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        plain.extend_from_slice(&8000u32.to_le_bytes());
+        plain.extend_from_slice(&16000u32.to_le_bytes());
+        plain.extend_from_slice(&2u16.to_le_bytes());
+        plain.extend_from_slice(&16u16.to_le_bytes());
+        plain.extend_from_slice(b"data");
+        plain.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+        plain.extend_from_slice(&samples);
+
+        let file = build_kgm_v3(&plain);
+        let (audio, fmt) = decrypt_file(&file, "song.kge").unwrap();
+        assert_eq!(fmt, "wav");
+        let opts = crate::transcode::OutputOptions::new("mp3".into(), 128);
+        let out = crate::transcode::apply_output(&audio, &fmt, &opts);
+        assert!(out.transcoded, "warning: {:?}", out.warning);
+        assert_eq!(out.format, "mp3");
+        assert_eq!(&out.data[..3], b"ID3");
     }
 
     // ---- 酷狗概念版 .kge 与 .kgm 同为 KGM v3 容器，走同一套 v3 解密 ----
